@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Per-Channel 8-bit Camera Feed</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1a202c; /* Dark background */
+            color: #e2e8f0; /* Light text */
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            background-color: #2d3748; /* Slightly lighter dark background for container */
+            padding: 24px;
+            border-radius: 12px;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            max-width: 90%;
+            width: 600px;
+        }
+        video, canvas {
+            border-radius: 8px;
+            background-color: #000;
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
+        button {
+            padding: 12px 24px;
+            background-color: #4299e1; /* Blue */
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.3s ease, transform 0.1s ease;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+        button:hover {
+            background-color: #3182ce; /* Darker blue on hover */
+            transform: translateY(-2px);
+        }
+        button:active {
+            transform: translateY(0);
+            box-shadow: none;
+        }
+        .message-box {
+            background-color: #2a4365; /* Darker blue for message box */
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            text-align: center;
+            min-height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        /* Hide the video element, we only need it to capture the stream */
+        video {
+            display: none;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 flex flex-col items-center justify-center min-h-screen p-5">
+    <div class="container bg-gray-800 rounded-xl shadow-lg p-6">
+        <h1 class="text-3xl font-bold mb-4 text-blue-400">Per-Channel 8-bit Camera Feed</h1>
+        <video id="video" playsinline autoplay muted class="rounded-lg border-2 border-gray-700"></video>
+        <canvas id="canvas" class="rounded-lg border-2 border-gray-700 w-full"></canvas>
+        <button id="removeColorBtn" class="mt-4 bg-blue-500 hover:bg-blue-600 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out">
+            Remove Random Level from a Channel
+        </button>
+        <div id="messageBox" class="message-box mt-4 bg-gray-700 text-gray-200 rounded-lg p-3 w-full">
+            Waiting for camera access...
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const removeColorBtn = document.getElementById('removeColorBtn');
+        const messageBox = document.getElementById('messageBox');
+
+        let animationFrameId;
+
+        // Sets to store available intensity levels for each channel (0-255 initially)
+        let availableRedLevels = new Set();
+        let availableGreenLevels = new Set();
+        let availableBlueLevels = new Set();
+
+        // Maps to store removed level -> closest available level for each channel
+        let removedRedMap = new Map();
+        let removedGreenMap = new Map();
+        let removedBlueMap = new Map();
+
+        // --- Utility Functions ---
+
+        /**
+         * Finds the closest available intensity level in a given set to a target level.
+         * @param {number} targetLevel - The intensity level to find a close match for (0-255).
+         * @param {Set<number>} availableLevelsSet - The set of currently available intensity levels.
+         * @returns {number} The closest available intensity level.
+         */
+        function findClosestLevel(targetLevel, availableLevelsSet) {
+            if (availableLevelsSet.size === 0) {
+                return 0; // Return 0 (black) if no levels are available
+            }
+
+            let closestLevel = 0;
+            let minDifference = Infinity;
+
+            for (const level of availableLevelsSet) {
+                const diff = Math.abs(targetLevel - level);
+                if (diff < minDifference) {
+                    minDifference = diff;
+                    closestLevel = level;
+                }
+            }
+            return closestLevel;
+        }
+
+        // --- Initialization ---
+
+        /**
+         * Initializes all three color channels (Red, Green, Blue) with 0-255 intensity levels.
+         */
+        function initializeChannelLevels() {
+            for (let i = 0; i <= 255; i++) {
+                availableRedLevels.add(i);
+                availableGreenLevels.add(i);
+                availableBlueLevels.add(i);
+            }
+            messageBox.textContent = `Initialized with 256 levels for Red, Green, and Blue channels.`;
+        }
+
+        // --- Camera and Canvas Processing ---
+
+        /**
+         * Processes each video frame: applies per-channel color remapping and draws to canvas.
+         */
+        function processFrame() {
+            if (video.paused || video.ended) {
+                return;
+            }
+
+            // Ensure canvas dimensions match video dimensions
+            if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+            }
+
+            // Draw the current video frame onto the canvas
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            // Get the image data from the canvas
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imageData.data; // Uint8ClampedArray: [R1, G1, B1, A1, R2, G2, B2, A2, ...]
+
+            // Iterate over each pixel
+            for (let i = 0; i < data.length; i += 4) {
+                let r = data[i];
+                let g = data[i + 1];
+                let b = data[i + 2];
+
+                // Process Red channel
+                if (removedRedMap.has(r)) {
+                    r = removedRedMap.get(r);
+                } else {
+                    r = findClosestLevel(r, availableRedLevels);
+                }
+
+                // Process Green channel
+                if (removedGreenMap.has(g)) {
+                    g = removedGreenMap.get(g);
+                } else {
+                    g = findClosestLevel(g, availableGreenLevels);
+                }
+
+                // Process Blue channel
+                if (removedBlueMap.has(b)) {
+                    b = removedBlueMap.get(b);
+                } else {
+                    b = findClosestLevel(b, availableBlueLevels);
+                }
+
+                // Update the pixel data on the canvas
+                data[i] = r;     // Red
+                data[i + 1] = g; // Green
+                data[i + 2] = b; // Blue
+                // data[i + 3] (alpha) remains unchanged
+            }
+
+            // Put the modified image data back onto the canvas
+            ctx.putImageData(imageData, 0, 0);
+
+            // Request the next animation frame
+            animationFrameId = requestAnimationFrame(processFrame);
+        }
+
+        /**
+         * Starts the camera stream and begins processing frames.
+         */
+        async function startCamera() {
+            try {
+                // Request access to the user's camera
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                video.srcObject = stream;
+
+                // When the video stream is loaded and ready to play
+                video.onloadedmetadata = () => {
+                    video.play();
+                    // Start processing frames once the video is playing
+                    animationFrameId = requestAnimationFrame(processFrame);
+                    messageBox.textContent = "Camera feed active. Click 'Remove Random Level from a Channel' to modify the colors.";
+                    removeColorBtn.disabled = false; // Enable the button once camera is ready
+                };
+            } catch (err) {
+                console.error("Error accessing camera: ", err);
+                messageBox.textContent = `Error accessing camera: ${err.message}. Please ensure camera access is granted.`;
+                removeColorBtn.disabled = true; // Keep button disabled on error
+            }
+        }
+
+        // --- Event Listener for Color Removal Button ---
+
+        removeColorBtn.addEventListener('click', () => {
+            const channels = [
+                { name: 'Red', levels: availableRedLevels, map: removedRedMap },
+                { name: 'Green', levels: availableGreenLevels, map: removedGreenMap },
+                { name: 'Blue', levels: availableBlueLevels, map: removedBlueMap }
+            ];
+
+            // Filter channels that still have levels to remove
+            const removableChannels = channels.filter(c => c.levels.size > 0);
+
+            if (removableChannels.length === 0) {
+                messageBox.textContent = "All intensity levels have been removed from all channels!";
+                removeColorBtn.disabled = true;
+                return;
+            }
+
+            // Randomly pick a channel from the ones that still have levels
+            const randomChannelIndex = Math.floor(Math.random() * removableChannels.length);
+            const selectedChannel = removableChannels[randomChannelIndex];
+
+            const availableLevelsArray = Array.from(selectedChannel.levels);
+            const randomIndex = Math.floor(Math.random() * availableLevelsArray.length);
+            const levelToRemove = availableLevelsArray[randomIndex];
+
+            // Remove the level from the available set for that channel
+            selectedChannel.levels.delete(levelToRemove);
+
+            // Find the closest level from the *remaining* available levels in that channel
+            let closestLevel = 0; // Default to 0
+            if (selectedChannel.levels.size > 0) {
+                closestLevel = findClosestLevel(levelToRemove, selectedChannel.levels);
+            }
+
+            // Store the mapping for the removed level
+            selectedChannel.map.set(levelToRemove, closestLevel);
+
+            messageBox.innerHTML = `Removed **${selectedChannel.name}** level: <span style="font-weight: bold;">${levelToRemove}</span>.<br>Mapped to closest: <span style="font-weight: bold;">${closestLevel}</span>.`;
+
+            // If all channels are empty, disable the button
+            if (availableRedLevels.size === 0 && availableGreenLevels.size === 0 && availableBlueLevels.size === 0) {
+                messageBox.textContent = "All intensity levels have been removed from all channels! The screen might be uniform black now.";
+                removeColorBtn.disabled = true;
+            }
+        });
+
+        // --- Initial Setup on Load ---
+        window.onload = () => {
+            initializeChannelLevels();
+            startCamera();
+            removeColorBtn.disabled = true; // Disable button until camera is ready
+        };
+
+        // Handle window resize to keep canvas responsive
+        window.addEventListener('resize', () => {
+            if (video.videoWidth > 0 && video.videoHeight > 0) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+            }
+        });
+
+        // Clean up animation frame on page unload
+        window.onbeforeunload = () => {
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+            }
+            if (video.srcObject) {
+                video.srcObject.getTracks().forEach(track => track.stop());
+            }
+        };
+
+    </script>
+</body>
+</html>
