@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Camera 16-bit with Remove</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0; overflow: hidden;
+    }
+    canvas, video {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    button {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 10;
+      font-size: 18px;
+      padding: 10px;
+    }
+  </style>
+</head>
+<body>
+<video id="video" autoplay playsinline style="display:none;"></video>
+<canvas id="canvas"></canvas>
+<button id="removeBtn">Remove Random Colour</button>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const btn = document.getElementById('removeBtn');
+
+let width = window.innerWidth;
+let height = window.innerHeight;
+canvas.width = width;
+canvas.height = height;
+
+// Create 16-bit RGB565 palette
+let palette = [];
+for (let r = 0; r < 32; r++) {
+  for (let g = 0; g < 64; g++) {
+    for (let b = 0; b < 32; b++) {
+      let R8 = Math.floor(r * 255 / 31);
+      let G8 = Math.floor(g * 255 / 63);
+      let B8 = Math.floor(b * 255 / 31);
+      palette.push({ r: R8, g: G8, b: B8 });
+    }
+  }
+}
+
+// Track active colours
+let activePalette = new Set(palette.map(c => `${c.r},${c.g},${c.b}`));
+
+// Find closest remaining colour
+function findClosestColor(target) {
+  let best = null;
+  let bestDist = Infinity;
+  activePalette.forEach(str => {
+    const [r, g, b] = str.split(',').map(Number);
+    let dist = (r - target.r) ** 2 + (g - target.g) ** 2 + (b - target.b) ** 2;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = { r, g, b };
+    }
+  });
+  return best;
+}
+
+// Quantize to 16-bit RGB565
+function quantize16(r, g, b) {
+  let r5 = Math.round(r / 255 * 31);
+  let g6 = Math.round(g / 255 * 63);
+  let b5 = Math.round(b / 255 * 31);
+  let R8 = Math.round(r5 * 255 / 31);
+  let G8 = Math.round(g6 * 255 / 63);
+  let B8 = Math.round(b5 * 255 / 31);
+  return { r: R8, g: G8, b: B8 };
+}
+
+// Remove random colour
+btn.addEventListener('click', () => {
+  if (activePalette.size === 0) return;
+  const paletteArray = Array.from(activePalette);
+  const randIndex = Math.floor(Math.random() * paletteArray.length);
+  activePalette.delete(paletteArray[randIndex]);
+});
+
+// Setup camera
+navigator.mediaDevices.getUserMedia({ video: { facingMode: { exact: "environment" } }, audio: false })
+.then(stream => {
+  video.srcObject = stream;
+  video.play();
+})
+.catch(err => {
+  console.error("Error accessing camera:", err);
+});
+
+// Draw loop
+function draw() {
+  ctx.drawImage(video, 0, 0, width, height);
+  let imageData = ctx.getImageData(0, 0, width, height);
+  let data = imageData.data;
+
+  for (let i = 0; i < data.length; i += 4) {
+    let r = data[i];
+    let g = data[i + 1];
+    let b = data[i + 2];
+
+    let quant = quantize16(r, g, b);
+    let key = `${quant.r},${quant.g},${quant.b}`;
+
+    if (activePalette.has(key)) {
+      data[i] = quant.r;
+      data[i + 1] = quant.g;
+      data[i + 2] = quant.b;
+    } else {
+      // Replace with closest active colour
+      let closest = findClosestColor(quant);
+      data[i] = closest.r;
+      data[i + 1] = closest.g;
+      data[i + 2] = closest.b;
+    }
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+  requestAnimationFrame(draw);
+}
+
+draw();
+</script>
+</body>
+</html>
